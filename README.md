@@ -7,4 +7,4 @@ Fluid simulation with Numpy, Pytorch and Eigen
 
 [Higher Quality Video](https://gfycat.com/heartfelthopefuldiscus)
 
-Based on "[Real-Time Fluid Dynamics for Games]("Real-Time Fluid Dynamics for Games" by Jos Stam)" by Jos Stam
+Based on [Real-Time Fluid Dynamics for Games](https://www.researchgate.net/publication/2560062_Real-Time_Fluid_Dynamics_for_Games) by Jos Stam
