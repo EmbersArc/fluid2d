@@ -1,22 +1,26 @@
-import numpy as np
+import torch
+from torch.nn.functional import conv2d
 import pyglet as pg
+import numpy as np
 from pyglet.gl import *
-
 
 GRIDSIZE = 256
 WINDOW_SCALING_FACTOR = 3.
 GAUSS_SEIDEL_TOLERANCE = 1e-4
 GAUSS_SEIDEL_ITER = 20
-COLOR = (255, 255, 0)
+COLOR = (255, 100, 0)
 
 FPS = 60
 VISC = 0.
 DIFF = 0.00002
-SOURCE = 20000.
+SOURCE = 40000.
 FORCE = 150.
 DISSOLVE = 0.005
 
 MAX_FRAMES = None
+
+cpu = torch.device("cpu")
+cuda = torch.device("cuda")
 
 
 def set_bnd(b: int, x):
@@ -32,7 +36,7 @@ def set_bnd(b: int, x):
 
 
 def lin_solve(b: int, x, x0, a: float, c: float):
-    x_last = np.zeros_like(x)
+    x_last = torch.zeros_like(x, device=cuda)
     for _ in range(GAUSS_SEIDEL_ITER):
         x[1:-1, 1:-1] = (
             x0[1:-1, 1:-1] + a * (x[0:-2, 1:-1] +
@@ -42,7 +46,7 @@ def lin_solve(b: int, x, x0, a: float, c: float):
         ) / c
         set_bnd(b, x)
 
-        if np.max(np.abs(x_last-x)) < GAUSS_SEIDEL_TOLERANCE:
+        if (x_last-x).norm(p=float("inf")) < GAUSS_SEIDEL_TOLERANCE:
             break
 
         x_last[:, :] = x
@@ -67,18 +71,18 @@ def advect(b: int, d, d0, u, v, dt: float):
     """
     N = d.shape[0] - 2
 
-    row_i = np.arange(1, N+1, dtype=np.intp).reshape(-1, 1)
-    col_j = np.arange(1, N+1, dtype=np.intp).reshape(1, -1)
+    row_i = torch.arange(1, N+1, dtype=torch.long, device=cuda).reshape(-1, 1)
+    col_j = torch.arange(1, N+1, dtype=torch.long, device=cuda).reshape(1, -1)
 
     dt0 = dt * N
     x = row_i - dt0 * u[1:-1, 1:-1]
     y = col_j - dt0 * v[1:-1, 1:-1]
 
-    np.clip(x, 0.5, N + 0.5, out=x)
-    np.clip(y, 0.5, N + 0.5, out=y)
+    x.clamp_(0.5, N + 0.5)
+    y.clamp_(0.5, N + 0.5)
 
-    i0 = x.astype(np.intp)
-    j0 = y.astype(np.intp)
+    i0 = x.to(torch.long)
+    j0 = y.to(torch.long)
     i1 = i0 + 1
     j1 = j0 + 1
 
@@ -146,17 +150,17 @@ class FluidSim(pyglet.window.Window):
         super(FluidSim, self).__init__(
             self.WINDOW_SIZE, self.WINDOW_SIZE, caption="Fluid")
         # Velocity
-        self.v = np.zeros((GRIDSIZE, GRIDSIZE),
-                          dtype=np.float)
-        self.v_prev = self.v.copy()
-        self.u = np.zeros((GRIDSIZE, GRIDSIZE),
-                          dtype=np.float)
-        self.u_prev = self.u.copy()
+        self.v = torch.zeros((GRIDSIZE, GRIDSIZE),
+                             dtype=torch.float, device=cuda)
+        self.v_prev = self.v.clone()
+        self.u = torch.zeros((GRIDSIZE, GRIDSIZE),
+                             dtype=torch.float, device=cuda)
+        self.u_prev = self.u.clone()
 
         # Density
-        self.d = np.zeros((GRIDSIZE, GRIDSIZE),
-                          dtype=np.float)
-        self.d_prev = self.d.copy()
+        self.d = torch.zeros((GRIDSIZE, GRIDSIZE),
+                             dtype=torch.float, device=cuda)
+        self.d_prev = self.d.clone()
 
         self.frame = 0
 
@@ -177,13 +181,15 @@ class FluidSim(pyglet.window.Window):
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        data = np.zeros(4 * (self.d.shape[0]-2)
-                        * (self.d.shape[1]-2), dtype=np.uint8)
+        d_cpu = self.d.to(cpu).numpy()
+
+        data = np.zeros(4 * (d_cpu.shape[0]-2)
+                        * (d_cpu.shape[1]-2), dtype=np.uint8)
         data[0::4] = COLOR[0]
         data[1::4] = COLOR[1]
         data[2::4] = COLOR[2]
-        data[3::4] = np.minimum(self.d[1:-1, 1:-1].T, 255).flatten()
-        image = pg.image.ImageData(self.d.shape[0] - 2, self.d.shape[1] - 2,
+        data[3::4] = np.minimum(d_cpu[1:-1, 1:-1].T, 255).flatten()
+        image = pg.image.ImageData(d_cpu.shape[0] - 2, d_cpu.shape[1] - 2,
                                    'RGBA', data.tobytes())
 
         self.clear()
@@ -215,20 +221,21 @@ class FluidSim(pyglet.window.Window):
 
         vel_step(self.u, self.v, self.u_prev, self.v_prev, VISC, dt)
         dens_step(self.d, self.d_prev, self.u, self.v, DIFF, dt)
+        torch.cuda.synchronize()
 
-        self.d_prev.fill(0.)
-        self.u_prev.fill(0.)
-        self.v_prev.fill(0.)
+        self.d_prev.fill_(0.)
+        self.u_prev.fill_(0.)
+        self.v_prev.fill_(0.)
 
         center = GRIDSIZE//2
         lower = GRIDSIZE//5
         source = 10000
         force = 50
 
-        self.d_prev[lower-1:lower+1, center-1:center+1] = source
-        self.u_prev[lower-1:lower+1, center-1:center+1] = force
-        self.d_prev[-lower-1:-lower+1, -center-1:-center+1] = source
-        self.u_prev[-lower-1:-lower+1, -center-1:-center+1] = -force
+        self.d_prev[lower:lower+2, center:center+2] = source
+        self.u_prev[lower:lower+2, center:center+2] = force
+        self.d_prev[-lower:-lower+2, -center:-center+2] = source
+        self.u_prev[-lower:-lower+2, -center:-center+2] = -force
 
     def run(self):
         pg.clock.schedule_interval(self.update, 1/FPS)
