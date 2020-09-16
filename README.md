@@ -11,7 +11,10 @@ Based on [Real-Time Fluid Dynamics for Games](https://www.researchgate.net/publi
 
 
 ## Performance Comparison
-FPS values for different grid sizes.
+CPU: Intel Core i5-6600K  
+GPU: GeForce GTX 1070
+
+FPS values for different grid sizes:
 | N | Numpy | Pytorch (CUDA) | Eigen |
 |---|-------|---------|-------|
 |128|160|60|**320**|
